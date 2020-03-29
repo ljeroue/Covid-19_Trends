@@ -1,34 +1,49 @@
 library(tidyverse) 
 
+# GET DATA
+# Pull data from my directory which has been pulled from Johns Hopkins Github
+# Make column names consistant
 
-# # Get today's date
-# (today <- format(Sys.Date(), "%m/%d/%y"))
-# today <- if(substr(today, 1, 1) == "0") substr(today, 2, nchar(today)) # remove leading zero in month
+fileDirectory <- "C:/LACEY/CODE/gitHub/Covid19/COVID-19/csse_covid_19_data/csse_covid_19_daily_reports/"
+dailyReports <- paste0(fileDirectory, dir(fileDirectory, pattern = "\\.csv$"))
 
-# # Pull data
-# deaths <- read_csv("C:/LACEY/CODE/gitHub/Covid19/COVID-19/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv")
+deaths <- NULL
+for(x in dailyReports){
+  report <- read_csv(x)
+  names(report) <- str_replace( names(report), "\\bLat\\b", "Latitude")
+  names(report) <- gsub("Long_", "Longitude", names(report))
+  names(report) <- gsub("Last Update", "Last_Update", names(report))
+  names(report) <- gsub("Province/State", "Province_State", names(report))
+  names(report) <- gsub("Country/Region", "Country_Region", names(report))
+  report$Date <- str_sub(x, start = -14, end = -5)  # the 'last update' column is inconsitent
+  deaths <- plyr::rbind.fill(deaths, report)
+}
 
-# Load the dataset directly from github
-gitURL <- RCurl::getURL("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv")
-deaths <- read_csv(gitURL)
 
-
-# Convert to long dataset
-deaths <- deaths %>% 
-  gather(date, deaths, `1/22/20`:`3/21/20`)
+deaths <- as_tibble(deaths)
 deaths
+
+deaths %>% 
+  filter(Country_Region == "Italy")
+
+
+# # Load the dataset directly from github
+# # gitURL <- RCurl::getURL("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv")
+# gitURL <- RCurl::getURL("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv")
+# deaths <- read_csv(gitURL)
+# # Convert to long dataset
+# deaths <- deaths %>% 
+#   gather(date, deaths, `1/22/20`:ncol(deaths))
+# deaths
 
 
 # Format date
-deaths <- deaths %>% 
-  mutate(Date = as.POSIXct(strptime(date, format = "%m/%d/%y")))
-
-typeof(deaths$Date)
-deaths
+deaths <- deaths %>%
+  mutate(Date = as.POSIXct(strptime(Date, format = "%m-%d-%Y")))
 
 
 # State Lookup table
-USState_Lookup <- tibble(`Province/State` = c("Alabama", "Alaska", "Arizona", "Arkansas", "California",
+USState_Lookup <- tibble(Province_State = c("Alabama", "Alaska", "Arizona", "Arkansas", "California",
                                   "Colorado", "Connecticut", "Delaware", "Florida", "Georgia",
                                   "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas",
                                   "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts",
@@ -45,103 +60,164 @@ USState_Lookup <- tibble(`Province/State` = c("Alabama", "Alaska", "Arizona", "A
                                        "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY")
 )
 
-# Add up all county data for each us state
-# On 3/10, Johns Hopkins switched from reporting by county to reporting by state
-TotalCounty <-
-  deaths %>% 
-  filter(`Country/Region` %in% c("US") &
-           str_detect(`Province/State`, "County,")) %>%  # subset to just US Counties 
-  mutate(State = unlist(lapply(str_split(`Province/State`, ", "), "[[", 2))) %>% # extract state
-  group_by(`Country/Region`, State, Date) %>% 
-  summarise(deaths = sum(deaths)) %>% 
-  left_join(USState_Lookup)
-  
-# Add county totals to state totals
-TotalState <- deaths %>% 
-  filter(`Country/Region` %in% c("US") &
-           !str_detect(`Province/State`, ",")) %>%  # remove all except just state (and ship) totals)
-  bind_rows(TotalCounty) %>% 
-  group_by(Date, `Country/Region`, `Province/State`) %>%
-  summarize(deaths = sum(deaths))
 
 
-# Replace original state totals, with newly calculated state total
+# Remove '(From Diamond Princess)'
+deaths$Province_State <- gsub("\\(From Diamond Princess\\)", "", deaths$Province_State)
+
+
+# Standardize 'China'
+deaths$Country_Region <- gsub("Mainland China", "China", deaths$Country_Region)
+
+
+
+# Pull out US Counties
+USCounty <- deaths %>% 
+  filter(Country_Region == "US" &
+         str_detect(Province_State, "County,")) 
+
+
+# Remove County from main df becuase it was not reported consistantly
 deaths <- deaths %>% 
-  mutate(stateCount = ifelse(`Country/Region` == "US" &  # disignate which are original state totals
-                               !str_detect(`Province/State`, ","), 1, 0)) %>% 
-  filter(stateCount == 0) %>%  # remove original state totals
-  bind_rows(TotalState) %>% 
-  select(-stateCount)
+  mutate(Remove = ifelse(Country_Region == "US" &
+                          str_detect(Province_State, "County,"), 1, 0)) %>% 
+  filter(Remove == 0) %>% 
+  select(-Remove)
 
-
-# Sum over states and provinces to get country totals for US and China
-TotalCountry <- deaths %>% 
-  filter(`Country/Region` %in% c("US", "China") &
-           !str_detect(`Province/State`, ",")) %>%  # remove all except just state (and ship) totals)
-  group_by(Date, `Country/Region`) %>%
-  summarize(deaths = sum(deaths))
-
-# Add country totals to main df
-deaths <- bind_rows(deaths, TotalCountry)
+# deaths %>%
+#   filter(Country_Region == "Italy")
 
 
 
-# What do we have just for USA? -includes states, counties and total
-deaths %>% 
-  filter(`Country/Region` == "US")
+# Extract City info
+USCity <- deaths %>% 
+  filter(Country_Region == "US" &
+         str_detect(Province_State, ", ")) %>% 
+  mutate(State = unlist(lapply(str_split(Province_State, ", "), "[[", 2)),
+         City = Province_State) %>% 
+  select(-Province_State) %>% 
+  left_join(USState_Lookup)
+    
 
-# Total in the US
-deaths %>% 
-  filter(`Country/Region` == "US" &
-           is.na(`Province/State`))
-
-
-# Just US Counties?
-deaths %>% 
-  filter(`Country/Region` == "US" &
-           str_detect(`Province/State`, "County"))
-
-
-# What do we have for the state of CA
-deaths %>% 
-  filter(`Country/Region` == "US" &
-           `Province/State` == "California")
+# Sum over cities
+USState_sum <- USCity %>% 
+  group_by(Province_State, Country_Region, Date) %>% 
+  summarize(Confirmed = sum(Confirmed),
+            Deaths = sum(Deaths),
+            Recovered = sum(Recovered),
+            Active = sum(Active))
 
 
-# What do we have for just Italy?
-deaths %>% 
-  filter(`Country/Region` == "Italy")
 
-# What do we have for just South Korea?
-deaths %>% 
-  filter(`Country/Region` == "Korea")
+# Add my calculated state totals to the main dataset
+deaths <- deaths %>% 
+  bind_rows(USState_sum)
 
-# What about for china - many province/states
-deaths %>% 
-  filter(`Country/Region` == "China")
 
+
+# On 3/22 Hopkins switches format again, shrug
+# city info is now stored in the Adimin2 column
+# Sum over cities for state totals
+USCity3_22 <- deaths %>% 
+  filter(Country_Region == "US" &
+           Date >= "2020-03-22")
+
+USState3_22 <- USCity3_22 %>% 
+  group_by(Province_State, Country_Region, Date) %>% 
+  summarize(Confirmed = sum(Confirmed),
+            Deaths = sum(Deaths),
+            Recovered = sum(Recovered))
+
+# Replace all US city data after 3/21 with state data
+deaths <- deaths %>% 
+  mutate(Remove = ifelse(Country_Region == "US" &
+                         Date >= "2020-03-22", 1, 0)) %>% 
+  filter(Remove == 0) %>% 
+  select(-Remove) %>% 
+  bind_rows(USState3_22)
+
+
+# # Add up all county data for each us state
+# # On 3/10, Johns Hopkins switched from reporting by county to reporting by state
+# TotalCounty <-
+#   deaths %>% 
+#   filter(`Country/Region` %in% c("US") &
+#            str_detect(`Province/State`, "County,")) %>%  # subset to just US Counties 
+#   mutate(State = unlist(lapply(str_split(`Province/State`, ", "), "[[", 2))) %>% # extract state
+#   group_by(`Country/Region`, State, Date) %>% 
+#   summarise(deaths = sum(deaths)) %>% 
+#   left_join(USState_Lookup)
+#   
+# 
+# unique(deaths$`Province/State`)
+
+
+# # Add county totals to state totals
+# TotalState <- deaths %>% 
+#   filter(`Country/Region` %in% c("US") &
+#            !str_detect(`Province/State`, ",")) %>%  # remove all except just state (and ship) totals)
+#   bind_rows(TotalCounty) %>% 
+#   group_by(Date, `Country/Region`, `Province/State`) %>%
+#   summarize(deaths = sum(deaths))
+
+
+# # Replace original state totals, with newly calculated state total
+# deaths <- deaths %>% 
+#   mutate(stateCount = ifelse(`Country/Region` == "US" &  # disignate which are original state totals
+#                                !str_detect(`Province/State`, ","), 1, 0)) %>% 
+#   filter(stateCount == 0) %>%  # remove original state totals
+#   bind_rows(TotalState) %>% 
+#   select(-stateCount)
+
+# deaths %>% 
+#   filter(Country_Region == 'US') %>% 
+#   select(Admin2, Province_State, Country_Region, Date)
+# 
+# unique(deaths$Admin2[deaths$Country_Region == 'US'])
+# 
+# # Has counties and cities and states
+# unique(deaths$Province_State[deaths$Country_Region == 'US'])
+ 
+
+# Sum over Province_State to get country totals for US and China
+USChina_totals <- deaths %>%
+  filter(Country_Region %in% c("China", "US") &
+           !str_detect(Province_State, ", ")) %>%  # remove city
+  group_by(Date, Country_Region) %>%
+  summarize(Confirmed = sum(Confirmed, na.rm = T),
+            Deaths = sum(Deaths, na.rm = T),
+            Recovered = sum(Recovered, na.rm = T),
+            Active = sum(Active, na.rm = T)
+            )
+
+# Add US & China totals to main df
+deaths <- bind_rows(deaths, USChina_totals)
+
+
+# VISUALIZE THE CURVES!
 
 # Visualize US
 deaths %>% 
-  filter(`Country/Region` == "US" &
-           is.na(`Province/State`)) %>% 
-  ggplot(aes(Date, deaths, color = `Country/Region`)) +
+  filter(Country_Region == "US" &
+           is.na(Province_State)) %>% 
+  ggplot(aes(Date, Deaths, color = Country_Region)) +
   geom_line()
 
 
 # Visualize top US States
 deaths %>% 
-  filter(`Country/Region` == "US" &
-           `Province/State` %in% c("California", "Washington", "New York")) %>% 
-  ggplot(aes(Date, deaths, color = `Province/State`)) +
+  filter(Country_Region == "US" &
+         Province_State %in% c("California", "Washington", "New York", "Florida",
+                                   "Texas", "Connecticut", "New Jersey")) %>% 
+  ggplot(aes(Date, Deaths, color = Province_State)) +
   geom_line()
 
 
 # Visualize top countries
 deaths %>% 
-  filter(`Country/Region` %in% c("China", "Italy", "US", "Korea, South", "Iran", "Spain") & 
-           is.na(`Province/State`)) %>% 
-  ggplot(aes(Date, deaths, color = `Country/Region`)) +
+  filter(Country_Region %in% c("China", "Italy", "US", "Korea, South", "Iran", 
+                               "Spain", "Germany") & 
+           is.na(Province_State)) %>% 
+  ggplot(aes(Date, Deaths, color = Country_Region)) +
   geom_line()
-
 
